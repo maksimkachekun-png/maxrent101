@@ -180,7 +180,7 @@ def worker():
                 c.execute("UPDATE orders SET paid=1 WHERE id=?", (oid,))
                 db().commit()
                 try:
-                    txt = f"> 💸 *Начисление\\!*\n> Номер `{ph}` успешно встал\n> *На ваш баланс было начислено:* `{int(pr)}$`\n> *Текущий баланс:* `{fmt(old+pr)}$`"
+                    txt = f"> 💸 *Начисление\\!*\n> Номер `{ph}` успешно отстоял холд\n> *На ваш баланс было начислено:* `{int(pr)}$`\n> *Текущий баланс:* `{fmt(old+pr)}$`"
                     bot.send_message(drop, txt, parse_mode="MarkdownV2", reply_markup=hide_kb())
                 except: pass
         except Exception as e: print(e); time.sleep(5)
